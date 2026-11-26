@@ -181,3 +181,81 @@ tests caught it: the starter's FORBIDDEN gate, and the new unclassified-column
 contract test (a raw column reached the model without being in
 `RAW_FEATURE_COLS`). The "too good to be true" test did not fire: `casual`
 alone does not push validation ridge R^2 over 0.95.
+
+## 2. The `.shift(1)` deleted from `cnt_roll_7`
+
+**Exact change** (seeded by `/seed-fault`):
+
+```diff
+     out["cnt_lag_1"] = out[TARGET].shift(1)
+     out["cnt_lag_7"] = out[TARGET].shift(LAG_WARMUP)
+-    out["cnt_roll_7"] = out[TARGET].shift(1).rolling(LAG_WARMUP).mean()
++    out["cnt_roll_7"] = out[TARGET].rolling(LAG_WARMUP).mean()
+```
+
+**Hook stderr:**
+
+```text
+[${CLAUDE_PROJECT_DIR}/.claude/hooks/check_leakage.sh]: Leakage tests failed after editing /Users/aarshiagupta/Documents/dsc180a/ma6/bikeshare-open/src/features.py:
+[714 rows x 29 columns]
+
+    def test_rolling_mean_excludes_today(feats):
+        """cnt_roll_7 must be the mean of the 7 calendar days *before* today."""
+        by_date = feats.set_index("dteday")[TARGET]
+        date = feats.dteday.iloc[200]
+        window = [date - pd.Timedelta(days=k) for k in range(1, 8)]
+        if all(d in by_date.index for d in window):
+            expected = sum(by_date[d] for d in window) / 7
+>           assert feats.set_index("dteday").cnt_roll_7[date] == pytest.approx(expected)
+E           assert np.float64(4389.0) == 4414.857142857143 ± 0.00441486
+E             
+E             comparison failed
+E             Obtained: 4389.0
+E             Expected: 4414.857142857143 ± 0.00441486
+
+tests/test_leakage.py:62: AssertionError
+```
+
+**Red test output** (`python -m pytest tests/ -q`):
+
+```text
+.........F.........                                                      [100%]
+=================================== FAILURES ===================================
+_______________________ test_rolling_mean_excludes_today _______________________
+
+feats =         dteday  instant  season  ...  cnt_lag_7   cnt_roll_7   cnt_roll_3
+0   2011-01-10     10.0  WINTER  ...     134....428571  2183.333333
+713 2012-12-31    731.0  WINTER  ...      920.0  1789.857143  2077.333333
+
+[714 rows x 29 columns]
+
+    def test_rolling_mean_excludes_today(feats):
+        """cnt_roll_7 must be the mean of the 7 calendar days *before* today."""
+        by_date = feats.set_index("dteday")[TARGET]
+        date = feats.dteday.iloc[200]
+        window = [date - pd.Timedelta(days=k) for k in range(1, 8)]
+        if all(d in by_date.index for d in window):
+            expected = sum(by_date[d] for d in window) / 7
+>           assert feats.set_index("dteday").cnt_roll_7[date] == pytest.approx(expected)
+E           assert np.float64(4389.0) == 4414.857142857143 ± 0.00441486
+E             
+E             comparison failed
+E             Obtained: 4389.0
+E             Expected: 4414.857142857143 ± 0.00441486
+
+tests/test_leakage.py:62: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_leakage.py::test_rolling_mean_excludes_today - assert np.fl...
+1 failed, 18 passed in 0.82s
+```
+
+**Turns to fix: 4.** The fix session restored `.shift(1)` and nothing else;
+19 passed, `git status` clean.
+
+**What this exposed.** Only one test catches this, and it checks one date
+(row 200). The broader leakage checks stay green because today's count is
+only 1/7 of the window: correlation with `cnt` stays under 0.99 and ridge
+stays under 0.95. The starter's test also guards its assertion with
+`if all(...)`, so if row 200 ever sat next to a missing day it would pass
+without checking anything. It holds today (the checked date has a full
+window), but it is the weakest link in the suite.
