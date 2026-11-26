@@ -82,12 +82,16 @@ def test_unknown_weather_label_raises():
 
 def test_no_feature_reconstructs_the_target(feats):
     """Catches leakage that FORBIDDEN cannot: a target-derived column under an
-    innocent name. No feature, and no sum of two features, may equal cnt."""
+    innocent name. No feature, and no sum of two features, may equal cnt; and
+    no feature may be a copy or rescaling of any FORBIDDEN column (e.g.
+    `walkups = casual`). Highest honest |corr| is ~0.95 (lagged counts)."""
     cols = feature_columns(feats)
     y = feats[TARGET]
     for c in cols:
         assert not (feats[c] == y).all(), f"{c} equals {TARGET}"
         assert abs(feats[c].corr(y)) < 0.99, f"{c} is a near-copy of {TARGET}"
+        for f in sorted(FORBIDDEN & set(feats.columns)):
+            assert abs(feats[c].corr(feats[f])) < 0.99, f"{c} is a near-copy of forbidden {f}"
     for a, b in combinations(cols, 2):
         assert not (feats[a] + feats[b] == y).all(), f"{a} + {b} equals {TARGET}"
 
