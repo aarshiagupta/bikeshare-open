@@ -7,9 +7,14 @@ scores R^2 = 1.0 and looks brilliant while having learned nothing.
 import pandas as pd
 import pytest
 
+from itertools import combinations
+
+from sklearn.metrics import r2_score
+
 from src.config import FORBIDDEN, TARGET
-from src.features import build_features, feature_columns
+from src.features import build_features, encode_weather, feature_columns
 from src.ingest import load_raw
+from src.train import MODELS, temporal_split
 
 
 @pytest.fixture(scope="module")
@@ -65,6 +70,35 @@ def test_roll_3_is_mean_of_three_prior_days(feats):
     row = feats.set_index("dteday").loc[pd.Timestamp("2011-06-15")]
     assert row.cnt_roll_3 == pytest.approx((4460 + 5020 + 4891) / 3)
     assert row.cnt_roll_3 != pytest.approx(row[TARGET])
+
+
+def test_unknown_weather_label_raises():
+    """encode_weather must fail loudly on a label it does not know. A silent
+    .map() turns it into NaN and dropna() deletes the day without a word.
+    No row in the real data exercises this, so only a direct call can."""
+    with pytest.raises(ValueError, match="unmapped weather"):
+        encode_weather(pd.Series(["GOOD", "SNOW"]))
+
+
+def test_no_feature_reconstructs_the_target(feats):
+    """Catches leakage that FORBIDDEN cannot: a target-derived column under an
+    innocent name. No feature, and no sum of two features, may equal cnt."""
+    cols = feature_columns(feats)
+    y = feats[TARGET]
+    for c in cols:
+        assert not (feats[c] == y).all(), f"{c} equals {TARGET}"
+        assert abs(feats[c].corr(y)) < 0.99, f"{c} is a near-copy of {TARGET}"
+    for a, b in combinations(cols, 2):
+        assert not (feats[a] + feats[b] == y).all(), f"{a} + {b} equals {TARGET}"
+
+
+def test_validation_score_is_not_too_good(feats):
+    """Honest ridge scores ~0.65 on validation. A same-day leak sends it to ~1.
+    Anything above 0.95 is treated as leakage until proven otherwise."""
+    cols = feature_columns(feats)
+    train, valid, _ = temporal_split(feats)
+    ridge = MODELS["ridge"].fit(train[cols], train[TARGET])
+    assert r2_score(valid[TARGET], ridge.predict(valid[cols])) < 0.95
 
 
 def test_no_missing_values(feats):

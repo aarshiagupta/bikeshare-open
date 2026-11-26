@@ -3,7 +3,8 @@ import pandas as pd
 import pytest
 from sklearn.metrics import r2_score
 
-from src.config import LAG_WARMUP, TARGET
+from src.config import (DATE_COL, FORBIDDEN, LAG_WARMUP, RAW_FEATURE_COLS,
+                        SOURCE_COLS, TARGET)
 from src.features import build_features, feature_columns, reindex_to_calendar
 from src.ingest import load_raw
 from src.train import MODELS, temporal_split
@@ -17,6 +18,20 @@ def raw():
 @pytest.fixture(scope="module")
 def feats(raw):
     return build_features(raw)
+
+
+def test_every_raw_column_is_classified(raw, feats):
+    """A column in the raw CSV that src/config.py does not classify must not
+    enter silently. feature_columns() keeps every numeric non-FORBIDDEN
+    column, so a new numeric column would become a feature with no review."""
+    classified = FORBIDDEN | RAW_FEATURE_COLS | SOURCE_COLS | {DATE_COL}
+    unclassified = set(raw.columns) - classified
+    assert not unclassified, (
+        f"unclassified raw columns {sorted(unclassified)}: add each to "
+        "FORBIDDEN, RAW_FEATURE_COLS or SOURCE_COLS in src/config.py")
+    raw_in_model = set(feature_columns(feats)) & set(raw.columns)
+    assert raw_in_model <= RAW_FEATURE_COLS, (
+        f"raw columns reaching the model without review: {sorted(raw_in_model - RAW_FEATURE_COLS)}")
 
 
 def test_calendar_is_complete_before_lagging(raw):
