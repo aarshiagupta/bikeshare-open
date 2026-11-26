@@ -15,10 +15,12 @@ reason it fails is the headline result.
 
 Run: python -m src.train
 """
+import argparse
 import json
 
+import numpy as np
 import pandas as pd
-from sklearn.base import BaseEstimator, RegressorMixin
+from sklearn.base import BaseEstimator, RegressorMixin, clone
 from sklearn.dummy import DummyRegressor
 from sklearn.ensemble import HistGradientBoostingRegressor
 from sklearn.linear_model import Ridge
@@ -62,10 +64,44 @@ def temporal_split(df: pd.DataFrame):
     return train, valid, test
 
 
-def fit_and_score() -> dict:
+# --- Exercise 4: target transformations (off by default) -------------------
+# Each maps cnt to a scale-free quantity using only past demand, so a model
+# trained on 2011 is not asked to predict 2012 *levels* it has never seen.
+# (forward y -> z, inverse z -> y); X is the feature frame for the same rows.
+TARGET_TRANSFORMS = {
+    "log": (lambda y, X: np.log1p(y), lambda z, X: np.expm1(z)),
+    "ratio_roll7": (lambda y, X: y / X["cnt_roll_7"], lambda z, X: z * X["cnt_roll_7"]),
+    "diff_roll7": (lambda y, X: y - X["cnt_roll_7"], lambda z, X: z + X["cnt_roll_7"]),
+    "ratio_lag1": (lambda y, X: y / X["cnt_lag_1"], lambda z, X: z * X["cnt_lag_1"]),
+}
+
+
+class TransformedTarget(BaseEstimator, RegressorMixin):
+    """Fit `model` on a transformed target; predict back on the cnt scale."""
+
+    def __init__(self, model, kind: str):
+        self.model, self.kind = model, kind
+
+    def fit(self, X, y):
+        fwd, _ = TARGET_TRANSFORMS[self.kind]
+        self.model.fit(X, fwd(y, X))
+        return self
+
+    def predict(self, X):
+        _, inv = TARGET_TRANSFORMS[self.kind]
+        return np.asarray(inv(self.model.predict(X), X), dtype=float)
+
+
+def fit_and_score(transform: str | None = None, include_test: bool = True) -> dict:
     df = pd.read_parquet(PROCESSED)
     cols = feature_columns(df)
     train, valid, test = temporal_split(df)
+    models = dict(MODELS)
+    if transform:
+        # Baselines are left alone; only the two learned models are transformed.
+        models["ridge"] = TransformedTarget(clone(MODELS["ridge"]), transform)
+        models["hgb"] = TransformedTarget(clone(MODELS["hgb"]), transform)
+    splits = [("valid", valid)] + ([("test", test)] if include_test else [])
 
     results = {
         "n_features": len(cols),
@@ -74,19 +110,31 @@ def fit_and_score() -> dict:
         "n_valid": len(valid),
         "n_test": len(test),
     }
-    for name, model in MODELS.items():
+    for name, model in models.items():
         model.fit(train[cols], train[TARGET])
         results[name] = {
             split: {
                 "r2": round(float(r2_score(part[TARGET], model.predict(part[cols]))), 4),
                 "mae": round(float(mean_absolute_error(part[TARGET], model.predict(part[cols]))), 1),
             }
-            for split, part in [("valid", valid), ("test", test)]
+            for split, part in splits
         }
     return results
 
 
 if __name__ == "__main__":
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--target-transform", choices=sorted(TARGET_TRANSFORMS))
+    ap.add_argument("--final", action="store_true",
+                    help="also score the test set (Exercise 4: once, at the end)")
+    ns = ap.parse_args()
+    if ns.target_transform:
+        # Exploration only: never written to reports/metrics.json, and the
+        # test set stays hidden unless --final is passed.
+        res = fit_and_score(ns.target_transform, include_test=ns.final)
+        print(json.dumps({"target_transform": ns.target_transform,
+                          **{k: v for k, v in res.items() if k != "features"}}, indent=2))
+        raise SystemExit(0)
     res = fit_and_score()
     METRICS.parent.mkdir(parents=True, exist_ok=True)
     METRICS.write_text(json.dumps(res, indent=2))
