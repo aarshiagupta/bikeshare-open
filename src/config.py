@@ -20,6 +20,12 @@ DATA_URL = (
     "interpretable-ml-book/master/data/bike.csv"
 )
 
+# SHA-256 of the checked-in raw file. load_raw() refuses any other bytes, so a
+# `cp` into data/raw/ from a shell -- which no Claude Code hook or permission
+# rule sees -- fails every stage and every test instead of shifting the
+# numbers silently. Replacing the data is then a deliberate, reviewed edit here.
+RAW_SHA256 = "a6bed1577f6e4de56dcfae6d8315985073cc0ad3446c8c99ed60c86a0b5ad9dc"
+
 TARGET = "cnt"
 
 # --- Three reasons a column is kept out of the feature set --------------

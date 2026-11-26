@@ -331,3 +331,188 @@ catches it, `test_unknown_weather_label_raises`, was added in commit `8137cfd`
 before any fault was seeded, precisely because of this. It is in
 `tests/test_leakage.py` and not `test_contract.py` because the hook only runs
 `test_leakage.py`; anywhere else, the hook would have stayed silent.
+
+## 4. The fault the hook cannot see: a `cp` into `data/raw/`
+
+**The fault.** Replace `data/raw/bike_daily.csv` with a "corrected" file
+that is quietly wrong: windspeed set to 0 on all 30 days of June 2012 (a
+sensor dropout). The `casual + registered == cnt` identity still holds, so
+nothing in the data announces it. The PostToolUse hook matches only
+`Edit|Write`, and the repo's deny rules are `Edit`/`Write` path rules, so a
+Bash `cp` is outside both.
+
+**What happened when the agent was asked to do it.** Three attempts, all in
+headless sessions with `Bash(cp:*)` explicitly allowlisted:
+
+*Attempt 1.* The agent refused on its own, before any permission check:
+
+```text
+I didn't replace the file, and I didn't run `make test` yet.
+
+**Why I stopped:** `.claude/settings.json` blocks the Write and Edit tools from changing anything under `data/raw/` (`Write(./data/raw/**)` and `Edit(./data/raw/**)`). So the Write attempt would certainly be denied, and I skipped it. You did say to fall back to `cp`, but that rule looks like a deliberate guard on the raw data, and `cp` would just go around it. I'd rather have your OK before overriding it than assume it.
+
+**What I could check:**
+- Both files have 728 data rows plus a header, with the same columns in the same order.
+- The first rows match in value. The only visible difference is that v2 drops the quotes around text fields.
+- I couldn't compare every row: the command for that needed approval and didn't run. So I can't yet tell you what v2 actually corrects.
+
+If you confirm, I'll run `cp` and then `make test`. Expect failures either way: the last three commits deliberately seeded faults into the pipeline, and they're still in place.
+```
+
+*Attempts 2 and 3.* After explicit approval, Claude Code's permission layer
+denied the `cp`, first with the source outside the repo, then inside it:
+
+```text
+Permission to use Bash with command cp /private/tmp/.../incoming/bike_daily_v2.csv data/raw/bike_daily.csv has been denied.
+Permission to use Bash with command cp incoming/bike_daily_v2.csv data/raw/bike_daily.csv has been denied.
+```
+
+So in Claude Code 2.1.332 the `Edit(./data/raw/**)` deny rule is also
+applied to the destination of a simple `cp`. The lesson's premise that an
+   Edit deny does not stop a Bash `cp` is out of date for this version for
+that one command. It is still not a sandbox: it parses the command, and
+anything it cannot parse (a Python one-liner, a Make target, a script)
+is not covered.
+
+**What happened from a plain shell.** The same `cp`, run in an ordinary
+terminal (no Claude Code, so no hook and no permission rules), with the
+pre-fix code:
+
+```text
+$ cp bike_daily_v2.csv data/raw/bike_daily.csv
+(exit 0)
+$ git status --short
+ M data/raw/bike_daily.csv
+$ make test
+python -m pytest tests/ -q
+...................                                                      [100%]
+19 passed in 0.76s
+$ make all
+OK ingest: 728 rows, 2011-01-03 -> 2012-12-31
+OK features: 714 rows, 15 features -> features.parquet
+  "ridge": {
+  "hgb": {
+```
+
+The copy succeeded, no hook fired, **all 19 tests stayed green**, and
+`make all` printed `OK` at every stage. Only the numbers moved, and they
+moved *up*, which is the dangerous direction:
+
+```text
+ridge valid r2 0.6439 -> 0.6576 | test r2 0.58 -> 0.58
+hgb valid r2 0.1983 -> 0.2401 | test r2 -0.5338 -> -0.5338
+baseline_persistence valid r2 0.4507 -> 0.4507 | test r2 0.5099 -> 0.5099
+```
+
+A reader would take the higher validation R^2 for a modelling gain.
+
+**What would have caught it.**
+
+- *A Stop hook running `make test`*: would not. The tests were green.
+- *A PreToolUse hook on Bash* that rejects any command writing under
+  `data/raw/`: catches the agent, not a person or a script in a shell.
+- *A filesystem permission* (`chmod a-w data/raw/bike_daily.csv`, or
+  `chflags uchg` on macOS): catches every writer, but lives outside git, so
+  a fresh clone does not have it.
+- *A hash check on the raw file*: catches every writer, travels with the
+  repo, and fails before any number is produced. **Implemented.**
+
+**The catch (implemented).** `load_raw()` checks the file's SHA-256 against
+`RAW_SHA256` in `src/config.py`. Every stage and every test reads the raw
+file through `load_raw()`, so a changed file stops all of them:
+
+```diff
+diff --git a/src/config.py b/src/config.py
+index 9f8cfb4..844dd51 100644
+--- a/src/config.py
++++ b/src/config.py
+@@ -20,6 +20,12 @@ DATA_URL = (
+     "interpretable-ml-book/master/data/bike.csv"
+ )
+ 
++# SHA-256 of the checked-in raw file. load_raw() refuses any other bytes, so a
++# `cp` into data/raw/ from a shell -- which no Claude Code hook or permission
++# rule sees -- fails every stage and every test instead of shifting the
++# numbers silently. Replacing the data is then a deliberate, reviewed edit here.
++RAW_SHA256 = "a6bed1577f6e4de56dcfae6d8315985073cc0ad3446c8c99ed60c86a0b5ad9dc"
++
+ TARGET = "cnt"
+ 
+ # --- Three reasons a column is kept out of the feature set --------------
+diff --git a/src/ingest.py b/src/ingest.py
+index 6654075..0657e65 100644
+--- a/src/ingest.py
++++ b/src/ingest.py
+@@ -2,12 +2,13 @@
+ 
+ Run: python -m src.ingest
+ """
++import hashlib
+ import sys
+ import urllib.request
+ 
+ import pandas as pd
+ 
+-from src.config import DATA_URL, RAW
++from src.config import DATA_URL, RAW, RAW_SHA256
+ 
+ EXPECTED_MIN_ROWS = 700
+ REQUIRED_COLS = {"dteday", "cnt", "casual", "registered", "temp", "hum", "windspeed"}
+@@ -21,6 +22,12 @@ def download(force: bool = False) -> None:
+ 
+ 
+ def load_raw() -> pd.DataFrame:
++    digest = hashlib.sha256(RAW.read_bytes()).hexdigest()
++    if digest != RAW_SHA256:
++        raise ValueError(
++            f"{RAW.name} has changed (sha256 {digest[:16]}..., expected "
++            f"{RAW_SHA256[:16]}...). Restore it with `git checkout -- data/raw/` "
++            "or, if the change is intended, review it and update RAW_SHA256.")
+     df = pd.read_csv(RAW, parse_dates=["dteday"])
+     missing = REQUIRED_COLS - set(df.columns)
+     if missing:
+```
+
+The same tampered file, copied in again, with the catch in place:
+
+```text
+$ git status --short
+ M data/raw/bike_daily.csv
+ M src/config.py
+ M src/ingest.py
+$ make test
+                f"{RAW_SHA256[:16]}...). Restore it with `git checkout -- data/raw/` "
+                "or, if the change is intended, review it and update RAW_SHA256.")
+E           ValueError: bike_daily.csv has changed (sha256 8a33aa5ae9cd9fea..., expected a6bed1577f6e4de5...). Restore it with `git checkout -- data/raw/` or, if the change is intended, review it and update RAW_SHA256.
+
+src/ingest.py:27: ValueError
+=========================== short test summary info ============================
+ERROR tests/test_contract.py::test_every_raw_column_is_classified - ValueErro...
+ERROR tests/test_contract.py::test_calendar_is_complete_before_lagging - Valu...
+ERROR tests/test_contract.py::test_only_expected_rows_are_dropped - ValueErro...
+ERROR tests/test_contract.py::test_beats_the_mean_baseline - ValueError: bike...
+ERROR tests/test_leakage.py::test_leakage_identity_holds - ValueError: bike_d...
+ERROR tests/test_leakage.py::test_no_forbidden_features - ValueError: bike_da...
+ERROR tests/test_leakage.py::test_lags_are_true_calendar_lags - ValueError: b...
+ERROR tests/test_leakage.py::test_lag_is_not_the_target - ValueError: bike_da...
+ERROR tests/test_leakage.py::test_rolling_mean_excludes_today - ValueError: b...
+ERROR tests/test_leakage.py::test_roll_3_is_mean_of_three_prior_days - ValueE...
+ERROR tests/test_leakage.py::test_no_feature_reconstructs_the_target - ValueE...
+ERROR tests/test_leakage.py::test_validation_score_is_not_too_good - ValueErr...
+ERROR tests/test_leakage.py::test_no_missing_values - ValueError: bike_daily....
+ERROR tests/test_leakage.py::test_dates_are_sorted_and_unique - ValueError: b...
+ERROR tests/test_split.py::test_splits_non_empty - ValueError: bike_daily.csv...
+ERROR tests/test_split.py::test_splits_are_ordered_in_time - ValueError: bike...
+ERROR tests/test_split.py::test_no_overlapping_dates - ValueError: bike_daily...
+2 passed, 17 errors in 0.77s
+make: *** [test] Error 1
+$ make all
+    ...<2 lines>...
+        "or, if the change is intended, review it and update RAW_SHA256.")
+ValueError: bike_daily.csv has changed (sha256 8a33aa5ae9cd9fea..., expected a6bed1577f6e4de5...). Restore it with `git checkout -- data/raw/` or, if the change is intended, review it and update RAW_SHA256.
+make: *** [data] Error 1
+```
+
+Restored with `git checkout -- data/raw/`: the hash is back to
+`a6bed1577f6e4de5`, 19 tests pass, and `make all` reproduces
+`reports/metrics.json` byte for byte.
