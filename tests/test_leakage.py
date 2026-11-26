@@ -57,6 +57,16 @@ def test_rolling_mean_excludes_today(feats):
         assert feats.set_index("dteday").cnt_roll_7[date] == pytest.approx(expected)
 
 
+def test_roll_3_is_mean_of_three_prior_days(feats):
+    """cnt_roll_3 on 2011-06-15 must be the mean of cnt on 06-12, 06-13, 06-14,
+    read by hand from data/raw/bike_daily.csv: (4460 + 5020 + 4891) / 3.
+    Same-day cnt is 5180, so a window that includes today gives a different
+    number and fails here."""
+    row = feats.set_index("dteday").loc[pd.Timestamp("2011-06-15")]
+    assert row.cnt_roll_3 == pytest.approx((4460 + 5020 + 4891) / 3)
+    assert row.cnt_roll_3 != pytest.approx(row[TARGET])
+
+
 def test_no_missing_values(feats):
     assert feats[feature_columns(feats)].isna().sum().sum() == 0
 
