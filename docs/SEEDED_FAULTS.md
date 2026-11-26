@@ -111,6 +111,9 @@ E       AssertionError: forbidden columns in feature set: {'casual'}
 E       assert not ({'atemp', 'casual', 'cnt_lag_1', 'cnt_lag_7', 'cnt_roll_3', 'cnt_roll_7', ...} & {'casual', 'cnt', 'cnt_2d_bfr', 'days_since_2011', 'instant', 'registered', ...})
 
 tests/test_leakage.py:36: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_leakage.py::test_no_forbidden_features - AssertionError: fo...
+1 failed, 10 passed in 1.31s
 ```
 
 **Red test output** (`python -m pytest tests/ -q`):
@@ -214,6 +217,9 @@ E             Obtained: 4389.0
 E             Expected: 4414.857142857143 ± 0.00441486
 
 tests/test_leakage.py:62: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_leakage.py::test_rolling_mean_excludes_today - assert np.fl...
+1 failed, 10 passed in 1.25s
 ```
 
 **Red test output** (`python -m pytest tests/ -q`):
@@ -259,3 +265,69 @@ stays under 0.95. The starter's test also guards its assertion with
 `if all(...)`, so if row 200 ever sat next to a missing day it would pass
 without checking anything. It holds today (the checked date has a full
 window), but it is the weakest link in the suite.
+
+## 3. The weather encoder's `raise` removed
+
+**Exact change** (seeded by `/seed-fault`):
+
+```diff
+     known = series.dropna()
+     unknown = set(known.unique()) - set(WEATHER_ORDER)
+-    if unknown:
+-        raise ValueError(f"unmapped weather labels: {sorted(unknown)}")
+     return series.map(WEATHER_ORDER).astype(float)
+```
+
+**Hook stderr:**
+
+```text
+[${CLAUDE_PROJECT_DIR}/.claude/hooks/check_leakage.sh]: Leakage tests failed after editing /Users/aarshiagupta/Documents/dsc180a/ma6/bikeshare-open/src/features.py:
+......F....                                                              [100%]
+=================================== FAILURES ===================================
+______________________ test_unknown_weather_label_raises _______________________
+
+    def test_unknown_weather_label_raises():
+        """encode_weather must fail loudly on a label it does not know. A silent
+        .map() turns it into NaN and dropna() deletes the day without a word.
+        No row in the real data exercises this, so only a direct call can."""
+>       with pytest.raises(ValueError, match="unmapped weather"):
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE ValueError
+
+tests/test_leakage.py:79: Failed
+=========================== short test summary info ============================
+FAILED tests/test_leakage.py::test_unknown_weather_label_raises - Failed: DID...
+1 failed, 10 passed in 1.25s
+```
+
+**Red test output** (`python -m pytest tests/ -q`):
+
+```text
+...........F.......                                                      [100%]
+=================================== FAILURES ===================================
+______________________ test_unknown_weather_label_raises _______________________
+
+    def test_unknown_weather_label_raises():
+        """encode_weather must fail loudly on a label it does not know. A silent
+        .map() turns it into NaN and dropna() deletes the day without a word.
+        No row in the real data exercises this, so only a direct call can."""
+>       with pytest.raises(ValueError, match="unmapped weather"):
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE ValueError
+
+tests/test_leakage.py:79: Failed
+=========================== short test summary info ============================
+FAILED tests/test_leakage.py::test_unknown_weather_label_raises - Failed: DID...
+1 failed, 18 passed in 0.84s
+```
+
+**Turns to fix: 5.** The fix session restored both lines exactly; 19 passed,
+`git status` clean.
+
+**What this exposed.** On the unmodified starter this fault was invisible:
+every one of the 14 starter tests stays green, because no row in the real
+data has an unknown label, so the `raise` is never reached. The test that
+catches it, `test_unknown_weather_label_raises`, was added in commit `8137cfd`
+before any fault was seeded, precisely because of this. It is in
+`tests/test_leakage.py` and not `test_contract.py` because the hook only runs
+`test_leakage.py`; anywhere else, the hook would have stayed silent.
