@@ -90,36 +90,41 @@ It fails for the right reason: the column does not exist yet. Commit
 +    return [c for c in numeric if c not in FORBIDDEN] + ["casual"]
 ```
 
-**Hook stderr** (fired on the Edit, before anyone ran a test):
+**Hook stderr** (fired on the Edit, before anyone ran a test; session
+`fbe086d9`):
 
 ```text
 [${CLAUDE_PROJECT_DIR}/.claude/hooks/check_leakage.sh]: Leakage tests failed after editing /Users/aarshiagupta/Documents/dsc180a/ma6/bikeshare-open/src/features.py:
-feats =         dteday  instant  season  ...  cnt_lag_7   cnt_roll_7   cnt_roll_3
-0   2011-01-10     10.0  WINTER  ...     134....142857  2183.333333
-713 2012-12-31    731.0  WINTER  ...      920.0  1531.428571  2077.333333
+        no feature may be a copy or rescaling of any FORBIDDEN column (e.g.
+        `walkups = casual`). Highest honest |corr| is ~0.95 (lagged counts)."""
+        cols = feature_columns(feats)
+        y = feats[TARGET]
+        for c in cols:
+            assert not (feats[c] == y).all(), f"{c} equals {TARGET}"
+            assert abs(feats[c].corr(y)) < 0.99, f"{c} is a near-copy of {TARGET}"
+            for f in sorted(FORBIDDEN & set(feats.columns)):
+>               assert abs(feats[c].corr(feats[f])) < 0.99, f"{c} is a near-copy of forbidden {f}"
+E               AssertionError: casual is a near-copy of forbidden casual
+E               assert np.float64(1.0) < 0.99
+E                +  where np.float64(1.0) = abs(np.float64(1.0))
+E                +    where np.float64(1.0) = corr(0       41.0\n1       43.0\n2       25.0\n3       38.0\n4       54.0\n       ...  \n709    247.0\n710    644.0\n711    159.0\n712    364.0\n713    439.0\nName: casual, Length: 714, dtype: float64)
+E                +      where corr = 0       41.0\n1       43.0\n2       25.0\n3       38.0\n4       54.0\n       ...  \n709    247.0\n710    644.0\n711    159.0\n712    364.0\n713    439.0\nName: casual, Length: 714, dtype: float64.corr
 
-[714 rows x 29 columns]
-
-    def test_no_forbidden_features(feats):
-        """Guards the gate, not the data: feature_columns() excludes FORBIDDEN by
-        construction, so this cannot discover a *new* leaky column. What it
-        catches is someone editing feature_columns() or FORBIDDEN -- which is
-        exactly the fault the Step 7 hook demonstrates."""
-        cols = set(feature_columns(feats))
->       assert not (cols & FORBIDDEN), f"forbidden columns in feature set: {cols & FORBIDDEN}"
-E       AssertionError: forbidden columns in feature set: {'casual'}
-E       assert not ({'atemp', 'casual', 'cnt_lag_1', 'cnt_lag_7', 'cnt_roll_3', 'cnt_roll_7', ...} & {'casual', 'cnt', 'cnt_2d_bfr', 'days_since_2011', 'instant', 'registered', ...})
-
-tests/test_leakage.py:36: AssertionError
+tests/test_leakage.py:94: AssertionError
 =========================== short test summary info ============================
 FAILED tests/test_leakage.py::test_no_forbidden_features - AssertionError: fo...
-1 failed, 10 passed in 1.31s
+FAILED tests/test_leakage.py::test_no_feature_reconstructs_the_target - Asser...
+2 failed, 9 passed in 1.11s
 ```
 
-**Red test output** (`python -m pytest tests/ -q`):
+The hook shows only the last 20 lines of pytest's output, which is why it
+opens mid-traceback.
+
+**Red test output** (`python -m pytest tests/ -q`, full output; the seeding
+session itself looked only at the last 25 lines):
 
 ```text
-F.....F............                                                      [100%]
+F.....F.....F......                                                      [100%]
 =================================== FAILURES ===================================
 _____________________ test_every_raw_column_is_classified ______________________
 
@@ -172,18 +177,52 @@ E       AssertionError: forbidden columns in feature set: {'casual'}
 E       assert not ({'atemp', 'casual', 'cnt_lag_1', 'cnt_lag_7', 'cnt_roll_3', 'cnt_roll_7', ...} & {'casual', 'cnt', 'cnt_2d_bfr', 'days_since_2011', 'instant', 'registered', ...})
 
 tests/test_leakage.py:36: AssertionError
+___________________ test_no_feature_reconstructs_the_target ____________________
+
+feats =         dteday  instant  season  ...  cnt_lag_7   cnt_roll_7   cnt_roll_3
+0   2011-01-10     10.0  WINTER  ...     134....142857  2183.333333
+713 2012-12-31    731.0  WINTER  ...      920.0  1531.428571  2077.333333
+
+[714 rows x 29 columns]
+
+    def test_no_feature_reconstructs_the_target(feats):
+        """Catches leakage that FORBIDDEN cannot: a target-derived column under an
+        innocent name. No feature, and no sum of two features, may equal cnt; and
+        no feature may be a copy or rescaling of any FORBIDDEN column (e.g.
+        `walkups = casual`). Highest honest |corr| is ~0.95 (lagged counts)."""
+        cols = feature_columns(feats)
+        y = feats[TARGET]
+        for c in cols:
+            assert not (feats[c] == y).all(), f"{c} equals {TARGET}"
+            assert abs(feats[c].corr(y)) < 0.99, f"{c} is a near-copy of {TARGET}"
+            for f in sorted(FORBIDDEN & set(feats.columns)):
+>               assert abs(feats[c].corr(feats[f])) < 0.99, f"{c} is a near-copy of forbidden {f}"
+E               AssertionError: casual is a near-copy of forbidden casual
+E               assert np.float64(1.0) < 0.99
+E                +  where np.float64(1.0) = abs(np.float64(1.0))
+E                +    where np.float64(1.0) = corr(0       41.0\n1       43.0\n2       25.0\n3       38.0\n4       54.0\n       ...  \n709    247.0\n710    644.0\n711    159.0\n712    364.0\n713    439.0\nName: casual, Length: 714, dtype: float64)
+E                +      where corr = 0       41.0\n1       43.0\n2       25.0\n3       38.0\n4       54.0\n       ...  \n709    247.0\n710    644.0\n711    159.0\n712    364.0\n713    439.0\nName: casual, Length: 714, dtype: float64.corr
+
+tests/test_leakage.py:94: AssertionError
 =========================== short test summary info ============================
 FAILED tests/test_contract.py::test_every_raw_column_is_classified - Assertio...
 FAILED tests/test_leakage.py::test_no_forbidden_features - AssertionError: fo...
-2 failed, 17 passed in 0.83s
+FAILED tests/test_leakage.py::test_no_feature_reconstructs_the_target - Asser...
+3 failed, 16 passed in 0.88s
 ```
 
-**Turns to fix: 4.** The fix session found the `+ ["casual"]`, removed it,
-and confirmed 19 passed; `git diff` was empty afterwards. Two independent
-tests caught it: the starter's FORBIDDEN gate, and the new unclassified-column
-contract test (a raw column reached the model without being in
-`RAW_FEATURE_COLS`). The "too good to be true" test did not fire: `casual`
-alone does not push validation ridge R^2 over 0.95.
+**Turns to fix: 7** (blind fix session `4be382e4`): it found the
+`+ ["casual"]`, removed it, and confirmed 19 passed with `git diff` empty.
+Three independent tests catch this fault: the starter's FORBIDDEN gate; the
+unclassified-column contract test (a raw column reached the model without
+being in `RAW_FEATURE_COLS`); and the copy-of-a-forbidden-column check.
+
+*Why fault 1 was recorded twice.* It was first recorded in `f3cd58d`/`7989151`,
+when 2 tests failed and the blind fix took 4 turns. The final review then
+found that a renamed single leak (`walkups = casual`) passed every test, and
+`2a0e86f` extended `test_no_feature_reconstructs_the_target` to close it.
+That made this fault trip a third test, so the section was re-recorded
+against the final suite: the output above is what the tests print today.
 
 ## 2. The `.shift(1)` deleted from `cnt_roll_7`
 
@@ -369,7 +408,7 @@ Permission to use Bash with command cp incoming/bike_daily_v2.csv data/raw/bike_
 
 So in Claude Code 2.1.332 the `Edit(./data/raw/**)` deny rule is also
 applied to the destination of a simple `cp`. The lesson's premise that an
-   Edit deny does not stop a Bash `cp` is out of date for this version for
+Edit deny does not stop a Bash `cp` is out of date for this version for
 that one command. It is still not a sandbox: it parses the command, and
 anything it cannot parse (a Python one-liner, a Make target, a script)
 is not covered.
@@ -516,3 +555,11 @@ make: *** [data] Error 1
 Restored with `git checkout -- data/raw/`: the hash is back to
 `a6bed1577f6e4de5`, 19 tests pass, and `make all` reproduces
 `reports/metrics.json` byte for byte.
+
+*Interaction with the unclassified-column test.* With this guard in place, a
+column appended to the raw CSV is stopped by the hash before
+`test_every_raw_column_is_classified` reaches its own assertion: that test
+errors with the hash message instead of failing with its own. It stays as
+the second line of defence for the case the hash cannot see, a new file
+whose hash was deliberately updated, and it was shown to fail on an appended
+column in `8137cfd`, before the guard existed.
